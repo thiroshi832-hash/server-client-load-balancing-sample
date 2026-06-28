@@ -3,6 +3,7 @@
 
 #include "database_config.h"
 
+#include <QByteArray>
 #include <QJsonArray>
 #include <QJsonObject>
 #include <QObject>
@@ -21,6 +22,7 @@ public slots:
 
 signals:
     void responseReady(quint64 sessionId, const QJsonObject &response);
+    void binaryResponseReady(quint64 sessionId, const QJsonObject &header, const QByteArray &payload);
 
 private:
     bool ensureOpen(QString *error);
@@ -32,11 +34,14 @@ private:
     bool runListTables(const QJsonObject &request, QJsonObject *payload, QString *error);
     bool runGetTableSchema(const QJsonObject &request, QJsonObject *payload, QString *error);
     bool runGetTableRows(const QJsonObject &request, QJsonObject *payload, QString *error);
+    bool runGetBlob(quint64 sessionId, quint64 requestId, const QJsonObject &request, QString *error);
     bool runInsertRow(const QJsonObject &request, QJsonObject *payload, QString *error);
     bool runUpdateRow(const QJsonObject &request, QJsonObject *payload, QString *error);
     bool runDeleteRow(const QJsonObject &request, QJsonObject *payload, QString *error);
 
     bool loadSchema(const QString &databaseName, const QString &tableName, QJsonArray *columns, QString *error);
+    QJsonObject blobMetadata(const QVariant &value) const;
+    bool isBlobColumn(const QJsonObject &column) const;
     QVariant jsonToVariant(const QJsonValue &value) const;
     QJsonValue variantToJson(const QVariant &value) const;
     QString lastSqlError(const QString &prefix) const;

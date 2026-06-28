@@ -20,6 +20,7 @@ DatabaseDispatcher::DatabaseDispatcher(const DatabaseConfig &config, QObject *pa
 
         connect(thread, &QThread::finished, worker, &QObject::deleteLater);
         connect(worker, &DatabaseTaskWorker::responseReady, this, &DatabaseDispatcher::responseReady);
+        connect(worker, &DatabaseTaskWorker::binaryResponseReady, this, &DatabaseDispatcher::binaryResponseReady);
 
         m_threads.append(thread);
         m_workers.append(worker);

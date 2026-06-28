@@ -24,6 +24,7 @@ signals:
     void disconnected();
     void stateChanged(const QString &state);
     void responseReceived(quint64 requestId, const QString &type, bool ok, const QJsonObject &payload, const QString &error);
+    void binaryResponseReceived(quint64 requestId, const QString &type, bool ok, const QJsonObject &payload, const QByteArray &data, const QString &error);
 
 private slots:
     void connectNow();

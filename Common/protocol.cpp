@@ -20,10 +20,13 @@ const char ListDatabases[] = "LIST_DATABASES";
 const char ListTables[] = "LIST_TABLES";
 const char GetTableSchema[] = "GET_TABLE_SCHEMA";
 const char GetTableRows[] = "GET_TABLE_ROWS";
+const char GetBlob[] = "GET_BLOB";
 const char InsertRow[] = "INSERT_ROW";
 const char UpdateRow[] = "UPDATE_ROW";
 const char DeleteRow[] = "DELETE_ROW";
 }
+
+static const char BinaryFrameMarker = 'B';
 
 QJsonObject makeRequest(quint64 id, const QString &type, const QJsonObject &payload)
 {
@@ -59,13 +62,39 @@ QByteArray encodeFrame(const QJsonObject &message)
     return frame;
 }
 
-bool tryDecodeFrame(QByteArray *buffer, QJsonObject *message, QString *error)
+QByteArray encodeBinaryFrame(const QJsonObject &header, const QByteArray &payload)
+{
+    const QByteArray json = QJsonDocument(header).toJson(QJsonDocument::Compact);
+    const quint32 bodySize = static_cast<quint32>(1 + sizeof(quint32) + json.size() + payload.size());
+
+    QByteArray frame;
+    frame.reserve(static_cast<int>(sizeof(quint32) + bodySize));
+
+    QDataStream stream(&frame, QIODevice::WriteOnly);
+    stream.setByteOrder(QDataStream::BigEndian);
+    stream << bodySize;
+    frame.append(BinaryFrameMarker);
+
+    QByteArray headerSizeBytes;
+    QDataStream headerSizeStream(&headerSizeBytes, QIODevice::WriteOnly);
+    headerSizeStream.setByteOrder(QDataStream::BigEndian);
+    headerSizeStream << static_cast<quint32>(json.size());
+    frame.append(headerSizeBytes);
+    frame.append(json);
+    frame.append(payload);
+    return frame;
+}
+
+FrameKind tryDecodeAnyFrame(QByteArray *buffer, QJsonObject *message, QByteArray *payload, QString *error)
 {
     if (!buffer || !message)
-        return false;
+        return InvalidFrame;
+
+    if (payload)
+        payload->clear();
 
     if (buffer->size() < static_cast<int>(sizeof(quint32)))
-        return false;
+        return NoFrame;
 
     QDataStream stream(buffer->left(static_cast<int>(sizeof(quint32))));
     stream.setByteOrder(QDataStream::BigEndian);
@@ -76,26 +105,67 @@ bool tryDecodeFrame(QByteArray *buffer, QJsonObject *message, QString *error)
         if (error)
             *error = QStringLiteral("Invalid frame size: %1").arg(frameSize);
         buffer->clear();
-        return false;
+        return InvalidFrame;
     }
 
     const int totalSize = static_cast<int>(sizeof(quint32) + frameSize);
     if (buffer->size() < totalSize)
-        return false;
+        return NoFrame;
 
-    const QByteArray json = buffer->mid(static_cast<int>(sizeof(quint32)), static_cast<int>(frameSize));
+    const QByteArray body = buffer->mid(static_cast<int>(sizeof(quint32)), static_cast<int>(frameSize));
     buffer->remove(0, totalSize);
 
+    if (!body.isEmpty() && body.at(0) == BinaryFrameMarker) {
+        if (body.size() < static_cast<int>(1 + sizeof(quint32))) {
+            if (error)
+                *error = QStringLiteral("Invalid binary frame header");
+            return InvalidFrame;
+        }
+
+        QDataStream headerStream(body.mid(1, static_cast<int>(sizeof(quint32))));
+        headerStream.setByteOrder(QDataStream::BigEndian);
+        quint32 headerSize = 0;
+        headerStream >> headerSize;
+
+        const int headerOffset = static_cast<int>(1 + sizeof(quint32));
+        if (headerSize == 0 || headerOffset + static_cast<int>(headerSize) > body.size()) {
+            if (error)
+                *error = QStringLiteral("Invalid binary frame JSON header size");
+            return InvalidFrame;
+        }
+
+        QJsonParseError parseError;
+        const QByteArray headerJson = body.mid(headerOffset, static_cast<int>(headerSize));
+        const QJsonDocument doc = QJsonDocument::fromJson(headerJson, &parseError);
+        if (parseError.error != QJsonParseError::NoError || !doc.isObject()) {
+            if (error)
+                *error = QStringLiteral("Invalid binary frame JSON header: %1").arg(parseError.errorString());
+            return InvalidFrame;
+        }
+
+        *message = doc.object();
+        if (payload)
+            *payload = body.mid(headerOffset + static_cast<int>(headerSize));
+        return BinaryFrame;
+    }
+
     QJsonParseError parseError;
-    const QJsonDocument doc = QJsonDocument::fromJson(json, &parseError);
+    const QJsonDocument doc = QJsonDocument::fromJson(body, &parseError);
     if (parseError.error != QJsonParseError::NoError || !doc.isObject()) {
         if (error)
             *error = QStringLiteral("Invalid JSON frame: %1").arg(parseError.errorString());
-        return false;
+        return InvalidFrame;
     }
 
     *message = doc.object();
-    return true;
+    return JsonFrame;
+}
+
+bool tryDecodeFrame(QByteArray *buffer, QJsonObject *message, QString *error)
+{
+    QByteArray payload;
+    const FrameKind kind = tryDecodeAnyFrame(buffer, message, &payload, error);
+    return kind == JsonFrame;
 }
 
 bool writeMessage(QIODevice *device, const QJsonObject &message, QString *error)
@@ -111,6 +181,25 @@ bool writeMessage(QIODevice *device, const QJsonObject &message, QString *error)
     if (written != frame.size()) {
         if (error)
             *error = QStringLiteral("Failed to write complete frame");
+        return false;
+    }
+
+    return true;
+}
+
+bool writeBinaryMessage(QIODevice *device, const QJsonObject &header, const QByteArray &payload, QString *error)
+{
+    if (!device || !device->isWritable()) {
+        if (error)
+            *error = QStringLiteral("Socket is not writable");
+        return false;
+    }
+
+    const QByteArray frame = encodeBinaryFrame(header, payload);
+    const qint64 written = device->write(frame);
+    if (written != frame.size()) {
+        if (error)
+            *error = QStringLiteral("Failed to write complete binary frame");
         return false;
     }
 

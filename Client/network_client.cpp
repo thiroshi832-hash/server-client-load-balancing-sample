@@ -99,9 +99,13 @@ void NetworkClient::readAvailable()
 
     while (true) {
         QJsonObject message;
+        QByteArray payloadData;
         QString error;
-        const bool decoded = Protocol::tryDecodeFrame(&m_buffer, &message, &error);
-        if (!decoded) {
+        const Protocol::FrameKind frameKind = Protocol::tryDecodeAnyFrame(&m_buffer, &message, &payloadData, &error);
+        if (frameKind == Protocol::NoFrame)
+            return;
+
+        if (frameKind == Protocol::InvalidFrame) {
             if (!error.isEmpty()) {
                 emit stateChanged(QStringLiteral("Protocol error: %1").arg(error));
                 m_socket.disconnectFromHost();
@@ -114,7 +118,10 @@ void NetworkClient::readAvailable()
         const bool ok = message.value(Protocol::Field::Ok).toBool(false);
         const QJsonObject payload = Protocol::messagePayload(message);
         const QString responseError = message.value(Protocol::Field::Error).toString();
-        emit responseReceived(requestId, type, ok, payload, responseError);
+        if (frameKind == Protocol::BinaryFrame)
+            emit binaryResponseReceived(requestId, type, ok, payload, payloadData, responseError);
+        else
+            emit responseReceived(requestId, type, ok, payload, responseError);
     }
 }
 

@@ -3,6 +3,10 @@
 #include "protocol.h"
 
 #include <QApplication>
+#include <QDialog>
+#include <QDialogButtonBox>
+#include <QFile>
+#include <QFileDialog>
 #include <QHeaderView>
 #include <QItemSelectionModel>
 #include <QJsonArray>
@@ -10,12 +14,14 @@
 #include <QLabel>
 #include <QMessageBox>
 #include <QModelIndex>
+#include <QPixmap>
 #include <QPushButton>
 #include <QSplitter>
 #include <QStackedWidget>
 #include <QStatusBar>
 #include <QStyle>
 #include <QTableView>
+#include <QTextEdit>
 #include <QToolBar>
 #include <QTreeView>
 #include <QVBoxLayout>
@@ -30,6 +36,7 @@ MainWindow::MainWindow(const QString &serverHost, quint16 serverPort, QWidget *p
     connect(m_client, &NetworkClient::disconnected, this, &MainWindow::handleDisconnected);
     connect(m_client, &NetworkClient::stateChanged, this, &MainWindow::handleConnectionState);
     connect(m_client, &NetworkClient::responseReceived, this, &MainWindow::handleResponse);
+    connect(m_client, &NetworkClient::binaryResponseReceived, this, &MainWindow::handleBinaryResponse);
 
     m_client->start(serverHost, serverPort);
     updateActions();
@@ -63,6 +70,7 @@ void MainWindow::buildUi()
     m_rowsView->setSelectionMode(QAbstractItemView::SingleSelection);
     m_rowsView->horizontalHeader()->setStretchLastSection(false);
     m_rowsView->horizontalHeader()->setSectionResizeMode(QHeaderView::Interactive);
+    connect(m_rowsView, &QTableView::doubleClicked, this, &MainWindow::handleRowsDoubleClick);
     connect(&m_rowsModel, &QStandardItemModel::itemChanged, this, &MainWindow::handleRowChanged);
     connect(m_rowsView->selectionModel(), &QItemSelectionModel::selectionChanged, this, [this]() {
         updateActions();
@@ -157,6 +165,10 @@ void MainWindow::handleResponse(quint64 requestId, const QString &type, bool ok,
         requestTableRows(0);
     } else if (type == QLatin1String(Protocol::Type::GetTableRows)) {
         applyRows(payload);
+    } else if (type == QLatin1String(Protocol::Type::GetBlob)) {
+        m_pendingBlobs.remove(requestId);
+        if (payload.value(QStringLiteral("isNull")).toBool(false))
+            QMessageBox::information(this, QStringLiteral("BLOB"), QStringLiteral("This BLOB value is NULL."));
     } else if (pending.action == QLatin1String("mutation")) {
         if (m_pendingMutations > 0)
             --m_pendingMutations;
@@ -165,6 +177,48 @@ void MainWindow::handleResponse(quint64 requestId, const QString &type, bool ok,
     }
 
     updateActions();
+}
+
+void MainWindow::handleBinaryResponse(quint64 requestId, const QString &type, bool ok, const QJsonObject &payload, const QByteArray &data, const QString &error)
+{
+    PendingRequest pending = m_pending.value(requestId);
+    if (type != QLatin1String(Protocol::Type::GetBlob))
+        return;
+
+    if (!ok) {
+        m_pending.remove(requestId);
+        m_pendingBlobs.remove(requestId);
+        QMessageBox::warning(this, QStringLiteral("BLOB Request Failed"), error);
+        return;
+    }
+
+    PendingBlob blob = m_pendingBlobs.value(requestId);
+    if (blob.columnName.isEmpty()) {
+        blob.databaseName = pending.databaseName;
+        blob.tableName = pending.tableName;
+        blob.columnName = pending.columnName;
+        blob.totalSize = payload.value(QStringLiteral("totalSize")).toInt(-1);
+    }
+
+    blob.data.append(data);
+    if (blob.totalSize < 0)
+        blob.totalSize = payload.value(QStringLiteral("totalSize")).toInt(-1);
+
+    const bool finalChunk = payload.value(QStringLiteral("final")).toBool(false);
+    if (finalChunk) {
+        m_pending.remove(requestId);
+        m_pendingBlobs.remove(requestId);
+        const QString title = QStringLiteral("%1.%2.%3 (%4)")
+                                  .arg(blob.databaseName, blob.tableName, blob.columnName, formatBlobSize(blob.data.size()));
+        showBlobViewer(title, blob.data);
+        statusBar()->showMessage(QStringLiteral("Loaded BLOB %1").arg(formatBlobSize(blob.data.size())), 4000);
+    } else {
+        m_pendingBlobs.insert(requestId, blob);
+        if (blob.totalSize > 0) {
+            statusBar()->showMessage(QStringLiteral("Loading BLOB %1 / %2")
+                                     .arg(formatBlobSize(blob.data.size()), formatBlobSize(blob.totalSize)), 1000);
+        }
+    }
 }
 
 void MainWindow::handleTreeDoubleClick(const QModelIndex &index)
@@ -197,6 +251,11 @@ void MainWindow::handleTableListDoubleClick(const QModelIndex &index)
         return;
 
     openTable(m_currentDatabase, item->text());
+}
+
+void MainWindow::handleRowsDoubleClick(const QModelIndex &index)
+{
+    requestBlob(index);
 }
 
 void MainWindow::handleRowChanged(QStandardItem *item)
@@ -370,6 +429,39 @@ void MainWindow::requestTableRows(int offset)
     registerPending(requestId, QStringLiteral("rows"), m_currentDatabase, m_currentTable);
 }
 
+void MainWindow::requestBlob(const QModelIndex &index)
+{
+    if (!index.isValid() || !m_client->isConnected())
+        return;
+
+    QStandardItem *item = m_rowsModel.item(index.row(), index.column());
+    if (!item || !item->data(BlobMetaRole).toBool())
+        return;
+
+    const QJsonObject key = originalKeyForRow(index.row());
+    if (key.isEmpty()) {
+        QMessageBox::warning(this, QStringLiteral("Cannot Load BLOB"), QStringLiteral("This row has no primary key values."));
+        return;
+    }
+
+    const QString columnName = m_currentColumns.value(index.column());
+    QJsonObject payload;
+    payload.insert(QStringLiteral("database"), m_currentDatabase);
+    payload.insert(QStringLiteral("table"), m_currentTable);
+    payload.insert(QStringLiteral("column"), columnName);
+    payload.insert(QStringLiteral("key"), key);
+
+    const quint64 requestId = m_client->sendRequest(QLatin1String(Protocol::Type::GetBlob), payload);
+    registerPending(requestId, QStringLiteral("blob"), m_currentDatabase, m_currentTable, columnName);
+
+    PendingBlob pendingBlob;
+    pendingBlob.databaseName = m_currentDatabase;
+    pendingBlob.tableName = m_currentTable;
+    pendingBlob.columnName = columnName;
+    m_pendingBlobs.insert(requestId, pendingBlob);
+    statusBar()->showMessage(QStringLiteral("Loading BLOB..."), 1000);
+}
+
 void MainWindow::openTable(const QString &databaseName, const QString &tableName)
 {
     m_currentDatabase = databaseName;
@@ -447,8 +539,11 @@ void MainWindow::applyRows(const QJsonObject &payload)
         const QJsonObject rowObject = rowValue.toObject();
         QList<QStandardItem *> items;
         for (const QString &column : m_currentColumns) {
-            QStandardItem *item = new QStandardItem(displayText(rowObject.value(column)));
-            item->setEditable(true);
+            const QJsonValue cellValue = rowObject.value(column);
+            QStandardItem *item = new QStandardItem(displayText(cellValue));
+            item->setEditable(!isBlobValue(cellValue));
+            if (isBlobValue(cellValue))
+                item->setData(true, BlobMetaRole);
             items.append(item);
         }
 
@@ -491,6 +586,16 @@ void MainWindow::registerPending(quint64 requestId, const QString &action, const
     m_pending.insert(requestId, pending);
 }
 
+void MainWindow::registerPending(quint64 requestId, const QString &action, const QString &databaseName, const QString &tableName, const QString &columnName)
+{
+    PendingRequest pending;
+    pending.action = action;
+    pending.databaseName = databaseName;
+    pending.tableName = tableName;
+    pending.columnName = columnName;
+    m_pending.insert(requestId, pending);
+}
+
 QStandardItem *MainWindow::findDatabaseItem(const QString &databaseName) const
 {
     for (int row = 0; row < m_treeModel.rowCount(); ++row) {
@@ -506,6 +611,8 @@ QJsonObject MainWindow::valuesForRow(int row) const
     QJsonObject values;
     for (int column = 0; column < m_currentColumns.count(); ++column) {
         QStandardItem *item = m_rowsModel.item(row, column);
+        if (item && item->data(BlobMetaRole).toBool())
+            continue;
         values.insert(m_currentColumns.at(column), valueFromEditorText(item ? item->text() : QString()));
     }
     return values;
@@ -550,10 +657,98 @@ QStringList MainWindow::primaryKeyColumns() const
     return columns;
 }
 
+QString MainWindow::formatBlobSize(int size) const
+{
+    if (size < 1024)
+        return QStringLiteral("%1 bytes").arg(size);
+    if (size < 1024 * 1024)
+        return QStringLiteral("%1 KB").arg(QString::number(size / 1024.0, 'f', 1));
+    return QStringLiteral("%1 MB").arg(QString::number(size / (1024.0 * 1024.0), 'f', 1));
+}
+
+bool MainWindow::isBlobValue(const QJsonValue &value) const
+{
+    return value.isObject() && value.toObject().value(QStringLiteral("_blob")).toBool(false);
+}
+
+void MainWindow::showBlobViewer(const QString &title, const QByteArray &data)
+{
+    QDialog dialog(this);
+    dialog.setWindowTitle(title);
+    dialog.resize(760, 560);
+
+    QVBoxLayout *layout = new QVBoxLayout(&dialog);
+    QLabel *summary = new QLabel(QStringLiteral("Size: %1").arg(formatBlobSize(data.size())), &dialog);
+    layout->addWidget(summary);
+
+    QPixmap pixmap;
+    if (pixmap.loadFromData(data)) {
+        QLabel *imageLabel = new QLabel(&dialog);
+        imageLabel->setAlignment(Qt::AlignCenter);
+        imageLabel->setPixmap(pixmap.scaled(720, 430, Qt::KeepAspectRatio, Qt::SmoothTransformation));
+        layout->addWidget(imageLabel, 1);
+    } else {
+        QTextEdit *textEdit = new QTextEdit(&dialog);
+        textEdit->setReadOnly(true);
+
+        const int sampleSize = qMin(data.size(), 4096);
+        int printable = 0;
+        for (int i = 0; i < sampleSize; ++i) {
+            const uchar ch = static_cast<uchar>(data.at(i));
+            if (ch == '\n' || ch == '\r' || ch == '\t' || (ch >= 32 && ch < 127))
+                ++printable;
+        }
+
+        if (sampleSize > 0 && printable > sampleSize * 8 / 10) {
+            textEdit->setPlainText(QString::fromUtf8(data));
+        } else {
+            const QByteArray preview = data.left(8192).toHex();
+            QString hexText;
+            for (int i = 0; i < preview.size(); i += 2) {
+                if (i > 0) {
+                    hexText.append(QLatin1Char(' '));
+                    if ((i / 2) % 16 == 0)
+                        hexText.append(QLatin1Char('\n'));
+                }
+                hexText.append(QString::fromLatin1(preview.mid(i, 2)));
+            }
+            if (data.size() > 8192)
+                hexText.append(QStringLiteral("\n\n... preview truncated ..."));
+            textEdit->setPlainText(hexText);
+        }
+
+        layout->addWidget(textEdit, 1);
+    }
+
+    QDialogButtonBox *buttons = new QDialogButtonBox(QDialogButtonBox::Save | QDialogButtonBox::Close, &dialog);
+    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    connect(buttons->button(QDialogButtonBox::Save), &QPushButton::clicked, &dialog, [this, &data]() {
+        const QString fileName = QFileDialog::getSaveFileName(this, QStringLiteral("Save BLOB"));
+        if (fileName.isEmpty())
+            return;
+
+        QFile file(fileName);
+        if (!file.open(QIODevice::WriteOnly)) {
+            QMessageBox::warning(this, QStringLiteral("Save Failed"), file.errorString());
+            return;
+        }
+        file.write(data);
+    });
+    layout->addWidget(buttons);
+
+    dialog.exec();
+}
+
 QString MainWindow::displayText(const QJsonValue &value) const
 {
     if (value.isUndefined() || value.isNull())
         return QString();
+    if (isBlobValue(value)) {
+        const QJsonObject blob = value.toObject();
+        if (blob.value(QStringLiteral("isNull")).toBool(false))
+            return QStringLiteral("[BLOB NULL]");
+        return QStringLiteral("[BLOB %1]").arg(formatBlobSize(blob.value(QStringLiteral("size")).toInt()));
+    }
     if (value.isString())
         return value.toString();
     if (value.isBool())

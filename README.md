@@ -54,6 +54,44 @@ Add `-StopMariaDb` if you also want to stop the XAMPP MariaDB process started fo
 - Existing-row update and delete require primary key values.
 - For production scale, run multiple server instances behind `Deploy/haproxy.cfg` and tune MySQL, OS socket limits, HAProxy limits, and worker counts.
 
+## BLOB Handling
+
+BLOB columns are not sent inside normal table page JSON. `GET_TABLE_ROWS` returns BLOB metadata only:
+
+```json
+{
+  "_blob": true,
+  "isNull": false,
+  "size": 245812,
+  "loaded": false
+}
+```
+
+The client shows this as `[BLOB 240.1 KB]`. Double-click the BLOB cell to request the value.
+
+The BLOB value is fetched with:
+
+```text
+GET_BLOB
+```
+
+The response uses binary frames:
+
+```text
+4-byte frame length
+'B'
+4-byte JSON header length
+JSON header
+raw BLOB bytes
+```
+
+This avoids Base64 and `QString` conversion for BLOB data. The client collects chunks and opens a viewer dialog:
+
+- image preview when Qt can load the bytes as an image
+- UTF-8/text preview when the data looks textual
+- hex preview for unknown binary data
+- Save button for all BLOB values
+
 ## MySQL Driver Requirement
 
 The repository includes the small runtime pieces needed for MySQL access without downloading after clone:

@@ -17,6 +17,7 @@ public:
     quint64 sessionId() const;
     QString peerName() const;
     void sendMessage(const QJsonObject &message);
+    void sendBinaryMessage(const QJsonObject &header, const QByteArray &payload);
 
 signals:
     void messageReceived(quint64 sessionId, const QJsonObject &message);

@@ -27,8 +27,10 @@ private slots:
     void handleDisconnected();
     void handleConnectionState(const QString &state);
     void handleResponse(quint64 requestId, const QString &type, bool ok, const QJsonObject &payload, const QString &error);
+    void handleBinaryResponse(quint64 requestId, const QString &type, bool ok, const QJsonObject &payload, const QByteArray &data, const QString &error);
     void handleTreeDoubleClick(const QModelIndex &index);
     void handleTableListDoubleClick(const QModelIndex &index);
+    void handleRowsDoubleClick(const QModelIndex &index);
     void handleRowChanged(QStandardItem *item);
     void addRow();
     void saveRows();
@@ -42,7 +44,8 @@ private:
         DatabaseRole,
         TableRole,
         RowStateRole,
-        OriginalKeyRole
+        OriginalKeyRole,
+        BlobMetaRole
     };
 
     enum NodeKind {
@@ -54,6 +57,15 @@ private:
         QString action;
         QString databaseName;
         QString tableName;
+        QString columnName;
+    };
+
+    struct PendingBlob {
+        QString databaseName;
+        QString tableName;
+        QString columnName;
+        QByteArray data;
+        int totalSize = -1;
     };
 
     void buildUi();
@@ -61,6 +73,7 @@ private:
     void requestTableList(const QString &databaseName);
     void requestTableSchema(const QString &databaseName, const QString &tableName);
     void requestTableRows(int offset);
+    void requestBlob(const QModelIndex &index);
     void openTable(const QString &databaseName, const QString &tableName);
     void populateDatabases(const QJsonArray &databases);
     void populateTables(const QString &databaseName, const QJsonArray &tables);
@@ -68,12 +81,16 @@ private:
     void applyRows(const QJsonObject &payload);
     void updateActions();
     void registerPending(quint64 requestId, const QString &action, const QString &databaseName = QString(), const QString &tableName = QString());
+    void registerPending(quint64 requestId, const QString &action, const QString &databaseName, const QString &tableName, const QString &columnName);
 
     QStandardItem *findDatabaseItem(const QString &databaseName) const;
     QJsonObject valuesForRow(int row) const;
     QJsonObject originalKeyForRow(int row) const;
     bool validateRequiredFields(const QJsonObject &values, QString *error) const;
     QStringList primaryKeyColumns() const;
+    QString formatBlobSize(int size) const;
+    bool isBlobValue(const QJsonValue &value) const;
+    void showBlobViewer(const QString &title, const QByteArray &data);
     QString displayText(const QJsonValue &value) const;
     QJsonValue valueFromEditorText(const QString &text) const;
 
@@ -94,6 +111,7 @@ private:
     QStandardItemModel m_tableListModel;
     QStandardItemModel m_rowsModel;
     QHash<quint64, PendingRequest> m_pending;
+    QHash<quint64, PendingBlob> m_pendingBlobs;
 
     QString m_currentDatabase;
     QString m_currentTable;

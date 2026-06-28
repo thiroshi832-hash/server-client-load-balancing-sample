@@ -1,6 +1,7 @@
 #ifndef TCP_SERVER_H
 #define TCP_SERVER_H
 
+#include <QByteArray>
 #include <QHash>
 #include <QHostAddress>
 #include <QJsonObject>
@@ -24,6 +25,7 @@ private slots:
     void sessionMessage(quint64 sessionId, const QJsonObject &message);
     void sessionClosed(quint64 sessionId);
     void dispatcherResponse(quint64 sessionId, const QJsonObject &response);
+    void dispatcherBinaryResponse(quint64 sessionId, const QJsonObject &header, const QByteArray &payload);
 
 private:
     void sendError(ClientSession *session, quint64 requestId, const QString &type, const QString &error);

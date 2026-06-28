@@ -40,6 +40,18 @@ void ClientSession::sendMessage(const QJsonObject &message)
     }
 }
 
+void ClientSession::sendBinaryMessage(const QJsonObject &header, const QByteArray &payload)
+{
+    if (!m_socket)
+        return;
+
+    QString error;
+    if (!Protocol::writeBinaryMessage(m_socket, header, payload, &error)) {
+        qWarning() << "Failed to send binary response to session" << m_sessionId << error;
+        m_socket->disconnectFromHost();
+    }
+}
+
 void ClientSession::readAvailable()
 {
     m_buffer.append(m_socket->readAll());

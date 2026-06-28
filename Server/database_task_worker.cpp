@@ -55,6 +55,10 @@ void DatabaseTaskWorker::process(quint64 sessionId, const QJsonObject &message)
         ok = runGetTableSchema(request, &payload, &error);
     } else if (type == QLatin1String(Protocol::Type::GetTableRows)) {
         ok = runGetTableRows(request, &payload, &error);
+    } else if (type == QLatin1String(Protocol::Type::GetBlob)) {
+        ok = runGetBlob(sessionId, requestId, request, &error);
+        if (ok)
+            return;
     } else if (type == QLatin1String(Protocol::Type::InsertRow)) {
         ok = runInsertRow(request, &payload, &error);
     } else if (type == QLatin1String(Protocol::Type::UpdateRow)) {
@@ -201,6 +205,17 @@ bool DatabaseTaskWorker::runGetTableRows(const QJsonObject &request, QJsonObject
     if (tableSql.isEmpty())
         return false;
 
+    QJsonArray schema;
+    if (!loadSchema(databaseName, tableName, &schema, error))
+        return false;
+
+    QSet<QString> blobColumns;
+    for (const QJsonValue &columnValue : schema) {
+        const QJsonObject column = columnValue.toObject();
+        if (isBlobColumn(column))
+            blobColumns.insert(column.value(QStringLiteral("name")).toString());
+    }
+
     const int offset = qMax(0, request.value(QStringLiteral("offset")).toInt(0));
     const int requestedLimit = request.value(QStringLiteral("limit")).toInt(100);
     const int limit = qBound(1, requestedLimit, 1000);
@@ -232,8 +247,14 @@ bool DatabaseTaskWorker::runGetTableRows(const QJsonObject &request, QJsonObject
         }
 
         QJsonObject row;
-        for (int i = 0; i < record.count(); ++i)
-            row.insert(record.fieldName(i), variantToJson(query.value(i)));
+        for (int i = 0; i < record.count(); ++i) {
+            const QString fieldName = record.fieldName(i);
+            const QVariant value = query.value(i);
+            if (blobColumns.contains(fieldName))
+                row.insert(fieldName, blobMetadata(value));
+            else
+                row.insert(fieldName, variantToJson(value));
+        }
         rows.append(row);
         ++count;
     }
@@ -245,6 +266,128 @@ bool DatabaseTaskWorker::runGetTableRows(const QJsonObject &request, QJsonObject
     payload->insert(QStringLiteral("hasMore"), hasMore);
     payload->insert(QStringLiteral("columns"), columns);
     payload->insert(QStringLiteral("rows"), rows);
+    return true;
+}
+
+bool DatabaseTaskWorker::runGetBlob(quint64 sessionId, quint64 requestId, const QJsonObject &request, QString *error)
+{
+    const QString databaseName = request.value(QStringLiteral("database")).toString();
+    const QString tableName = request.value(QStringLiteral("table")).toString();
+    const QString columnName = request.value(QStringLiteral("column")).toString();
+    const QJsonObject key = request.value(QStringLiteral("key")).toObject();
+
+    const QString tableSql = qualifiedTableName(databaseName, tableName, error);
+    if (tableSql.isEmpty())
+        return false;
+
+    if (key.isEmpty()) {
+        if (error)
+            *error = QStringLiteral("BLOB request requires primary key values");
+        return false;
+    }
+
+    QJsonArray schema;
+    if (!loadSchema(databaseName, tableName, &schema, error))
+        return false;
+
+    QSet<QString> knownColumns;
+    bool columnIsBlob = false;
+    for (const QJsonValue &columnValue : schema) {
+        const QJsonObject column = columnValue.toObject();
+        const QString name = column.value(QStringLiteral("name")).toString();
+        knownColumns.insert(name);
+        if (name == columnName)
+            columnIsBlob = isBlobColumn(column);
+    }
+
+    if (!knownColumns.contains(columnName)) {
+        if (error)
+            *error = QStringLiteral("Unknown BLOB column: %1").arg(columnName);
+        return false;
+    }
+
+    if (!columnIsBlob) {
+        if (error)
+            *error = QStringLiteral("Column is not a BLOB/binary column: %1").arg(columnName);
+        return false;
+    }
+
+    QStringList whereParts;
+    for (const QString &name : key.keys()) {
+        if (!knownColumns.contains(name)) {
+            if (error)
+                *error = QStringLiteral("Unknown key column: %1").arg(name);
+            return false;
+        }
+        whereParts.append(QStringLiteral("%1 = :k%2").arg(quotedIdentifier(name, error)).arg(whereParts.count()));
+    }
+
+    const QString columnSql = quotedIdentifier(columnName, error);
+    if (columnSql.isEmpty())
+        return false;
+
+    const QString sql = QStringLiteral("SELECT %1 FROM %2 WHERE %3 LIMIT 1")
+                            .arg(columnSql, tableSql, whereParts.join(QStringLiteral(" AND ")));
+    QSqlQuery query(QSqlDatabase::database(m_connectionName));
+    if (!query.prepare(sql)) {
+        if (error)
+            *error = lastSqlError(QStringLiteral("Prepare BLOB query failed"));
+        return false;
+    }
+
+    int index = 0;
+    for (const QString &name : key.keys())
+        query.bindValue(QStringLiteral(":k%1").arg(index++), jsonToVariant(key.value(name)));
+
+    if (!query.exec()) {
+        if (error)
+            *error = lastSqlError(QStringLiteral("BLOB query failed"));
+        return false;
+    }
+
+    if (!query.next()) {
+        if (error)
+            *error = QStringLiteral("BLOB row was not found");
+        return false;
+    }
+
+    const QVariant value = query.value(0);
+    if (!value.isValid() || value.isNull()) {
+        QJsonObject responsePayload;
+        responsePayload.insert(QStringLiteral("database"), databaseName);
+        responsePayload.insert(QStringLiteral("table"), tableName);
+        responsePayload.insert(QStringLiteral("column"), columnName);
+        responsePayload.insert(QStringLiteral("isNull"), true);
+        emit responseReady(sessionId, Protocol::makeResponse(requestId, QLatin1String(Protocol::Type::GetBlob), true, responsePayload));
+        return true;
+    }
+
+    const QByteArray blob = value.toByteArray();
+    const int chunkSize = 64 * 1024;
+    const int totalSize = blob.size();
+    int offset = 0;
+    int chunkIndex = 0;
+
+    do {
+        const QByteArray chunk = blob.mid(offset, chunkSize);
+        QJsonObject chunkPayload;
+        chunkPayload.insert(QStringLiteral("database"), databaseName);
+        chunkPayload.insert(QStringLiteral("table"), tableName);
+        chunkPayload.insert(QStringLiteral("column"), columnName);
+        chunkPayload.insert(QStringLiteral("offset"), offset);
+        chunkPayload.insert(QStringLiteral("chunkIndex"), chunkIndex);
+        chunkPayload.insert(QStringLiteral("chunkSize"), chunk.size());
+        chunkPayload.insert(QStringLiteral("totalSize"), totalSize);
+        chunkPayload.insert(QStringLiteral("final"), offset + chunk.size() >= totalSize);
+
+        emit binaryResponseReady(sessionId,
+                                 Protocol::makeResponse(requestId, QLatin1String(Protocol::Type::GetBlob), true, chunkPayload),
+                                 chunk);
+
+        offset += chunk.size();
+        ++chunkIndex;
+    } while (offset < totalSize);
+
     return true;
 }
 
@@ -498,6 +641,27 @@ bool DatabaseTaskWorker::loadSchema(const QString &databaseName, const QString &
     }
 
     return true;
+}
+
+QJsonObject DatabaseTaskWorker::blobMetadata(const QVariant &value) const
+{
+    QJsonObject metadata;
+    metadata.insert(QStringLiteral("_blob"), true);
+    metadata.insert(QStringLiteral("isNull"), !value.isValid() || value.isNull());
+    metadata.insert(QStringLiteral("size"), value.isValid() && !value.isNull() ? value.toByteArray().size() : 0);
+    metadata.insert(QStringLiteral("loaded"), false);
+    return metadata;
+}
+
+bool DatabaseTaskWorker::isBlobColumn(const QJsonObject &column) const
+{
+    const QString dataType = column.value(QStringLiteral("dataType")).toString().toLower();
+    return dataType == QLatin1String("blob")
+        || dataType == QLatin1String("tinyblob")
+        || dataType == QLatin1String("mediumblob")
+        || dataType == QLatin1String("longblob")
+        || dataType == QLatin1String("binary")
+        || dataType == QLatin1String("varbinary");
 }
 
 QVariant DatabaseTaskWorker::jsonToVariant(const QJsonValue &value) const

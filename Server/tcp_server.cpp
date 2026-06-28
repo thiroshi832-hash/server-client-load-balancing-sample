@@ -14,6 +14,7 @@ TcpServer::TcpServer(DatabaseDispatcher *dispatcher, QObject *parent)
 {
     connect(&m_server, &QTcpServer::newConnection, this, &TcpServer::acceptConnection);
     connect(m_dispatcher, &DatabaseDispatcher::responseReady, this, &TcpServer::dispatcherResponse);
+    connect(m_dispatcher, &DatabaseDispatcher::binaryResponseReady, this, &TcpServer::dispatcherBinaryResponse);
 }
 
 bool TcpServer::listen(const QHostAddress &address, quint16 port)
@@ -93,6 +94,15 @@ void TcpServer::dispatcherResponse(quint64 sessionId, const QJsonObject &respons
     session->sendMessage(response);
 }
 
+void TcpServer::dispatcherBinaryResponse(quint64 sessionId, const QJsonObject &header, const QByteArray &payload)
+{
+    ClientSession *session = m_sessions.value(sessionId, nullptr);
+    if (!session)
+        return;
+
+    session->sendBinaryMessage(header, payload);
+}
+
 void TcpServer::sendError(ClientSession *session, quint64 requestId, const QString &type, const QString &error)
 {
     if (!session)
@@ -106,6 +116,7 @@ bool TcpServer::isDatabaseRequest(const QString &type) const
         || type == QLatin1String(Protocol::Type::ListTables)
         || type == QLatin1String(Protocol::Type::GetTableSchema)
         || type == QLatin1String(Protocol::Type::GetTableRows)
+        || type == QLatin1String(Protocol::Type::GetBlob)
         || type == QLatin1String(Protocol::Type::InsertRow)
         || type == QLatin1String(Protocol::Type::UpdateRow)
         || type == QLatin1String(Protocol::Type::DeleteRow);

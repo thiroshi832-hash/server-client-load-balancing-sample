@@ -3,6 +3,7 @@
 
 #include "database_config.h"
 
+#include <QByteArray>
 #include <QJsonObject>
 #include <QObject>
 #include <QVector>
@@ -22,6 +23,7 @@ public:
 
 signals:
     void responseReady(quint64 sessionId, const QJsonObject &response);
+    void binaryResponseReady(quint64 sessionId, const QJsonObject &header, const QByteArray &payload);
 
 private:
     QVector<QThread *> m_threads;
