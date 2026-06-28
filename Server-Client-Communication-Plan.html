@@ -1,0 +1,444 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Server-Client Communication Application Plan</title>
+  <style>
+    @page {
+      size: A4;
+      margin: 16mm 15mm;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      color: #18212f;
+      font: 12.5px/1.5 "Segoe UI", Arial, sans-serif;
+      background: #ffffff;
+    }
+
+    h1,
+    h2,
+    h3 {
+      margin: 0;
+      color: #101827;
+      line-height: 1.2;
+    }
+
+    h1 {
+      font-size: 26px;
+      letter-spacing: 0;
+    }
+
+    h2 {
+      margin-top: 24px;
+      padding-bottom: 5px;
+      border-bottom: 1px solid #cbd5e1;
+      font-size: 17px;
+    }
+
+    h3 {
+      margin-top: 16px;
+      font-size: 14px;
+    }
+
+    p {
+      margin: 7px 0;
+    }
+
+    ul,
+    ol {
+      margin: 7px 0 7px 20px;
+      padding: 0;
+    }
+
+    li {
+      margin: 3px 0;
+    }
+
+    table {
+      width: 100%;
+      margin-top: 9px;
+      border-collapse: collapse;
+      page-break-inside: avoid;
+    }
+
+    th,
+    td {
+      padding: 7px 8px;
+      border: 1px solid #cbd5e1;
+      vertical-align: top;
+      text-align: left;
+    }
+
+    th {
+      color: #0f172a;
+      background: #eef2f7;
+      font-weight: 700;
+    }
+
+    code {
+      padding: 1px 4px;
+      border-radius: 3px;
+      background: #eef2f7;
+      font-family: Consolas, "Courier New", monospace;
+      font-size: 11.5px;
+    }
+
+    pre {
+      margin: 10px 0;
+      padding: 12px;
+      border: 1px solid #cbd5e1;
+      border-radius: 6px;
+      color: #0f172a;
+      background: #f8fafc;
+      font-family: Consolas, "Courier New", monospace;
+      font-size: 11px;
+      line-height: 1.45;
+      white-space: pre-wrap;
+      page-break-inside: avoid;
+    }
+
+    .cover {
+      padding: 18px 20px;
+      border: 1px solid #cbd5e1;
+      border-radius: 8px;
+      background: #f8fafc;
+    }
+
+    .meta {
+      margin-top: 12px;
+      color: #475569;
+      font-size: 12px;
+    }
+
+    .summary {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 8px;
+      margin-top: 14px;
+    }
+
+    .summary div {
+      min-height: 42px;
+      padding: 9px 10px;
+      border: 1px solid #d7dee8;
+      border-radius: 6px;
+      background: #ffffff;
+    }
+
+    .label {
+      display: block;
+      margin-bottom: 2px;
+      color: #475569;
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+    }
+
+    .note {
+      padding: 9px 10px;
+      border-left: 4px solid #2563eb;
+      background: #eff6ff;
+      page-break-inside: avoid;
+    }
+
+    .warning {
+      padding: 9px 10px;
+      border-left: 4px solid #b45309;
+      background: #fffbeb;
+      page-break-inside: avoid;
+    }
+
+    .page-break {
+      page-break-before: always;
+    }
+  </style>
+</head>
+<body>
+  <section class="cover">
+    <h1>Server-Client Communication Application Plan</h1>
+    <p class="meta">Qt 5.14.0 desktop client, Qt server, MySQL database access through server only, with TCP load balancing.</p>
+    <div class="summary">
+      <div>
+        <span class="label">Client</span>
+        Qt Widgets application with database tree, table browser, editable row grid, and live connection state.
+      </div>
+      <div>
+        <span class="label">Server</span>
+        Qt QCoreApplication service that owns all MySQL access, validates requests, and executes SQL through pooled connections.
+      </div>
+      <div>
+        <span class="label">Scaling</span>
+        Multiple server instances behind HAProxy or Nginx stream load balancing.
+      </div>
+      <div>
+        <span class="label">Database</span>
+        MySQL-compatible backend. Exact target version should be confirmed before final driver packaging.
+      </div>
+    </div>
+  </section>
+
+  <h2>1. Main Goal</h2>
+  <p>
+    Build a server-client database management application. The client connects to the server, shows databases in a left sidebar,
+    expands a selected database into tables, shows the selected database tables in the right panel, and allows users to view,
+    insert, save, and delete table rows. The client must never connect to MySQL directly.
+  </p>
+
+  <h2>2. High-Level Architecture</h2>
+  <pre>Client App 1 ----\
+Client App 2 -----+--> Load Balancer --> Qt Server Instance 1 --> MySQL
+Client App N ----/                    --> Qt Server Instance 2 --> MySQL
+                                      --> Qt Server Instance N --> MySQL</pre>
+  <p>
+    The load balancer owns the public TCP endpoint. Each server instance is mostly stateless and can serve any client.
+    The database remains protected behind the server layer.
+  </p>
+
+  <h2>3. Project Structure</h2>
+  <table>
+    <thead>
+      <tr>
+        <th>Project</th>
+        <th>Type</th>
+        <th>Responsibility</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>Common</code></td>
+        <td>Shared library</td>
+        <td>Protocol framing, request and response types, error codes, constants, serialization helpers.</td>
+      </tr>
+      <tr>
+        <td><code>Server</code></td>
+        <td>Qt console/service app</td>
+        <td>TCP accept loop, session management, authentication, request routing, MySQL connection pooling, validation, SQL execution.</td>
+      </tr>
+      <tr>
+        <td><code>Client</code></td>
+        <td>Qt Widgets app</td>
+        <td>Connection management, database tree, table list view, editable table grid, add/save/delete actions, user feedback.</td>
+      </tr>
+      <tr>
+        <td><code>Deploy</code></td>
+        <td>Configuration</td>
+        <td>HAProxy or Nginx stream config, server instance config, startup scripts, environment examples.</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2>4. Load Balancing Requirement</h2>
+  <p>
+    Use a proven TCP load balancer instead of building a custom load balancer in Qt. Recommended choices are HAProxy or
+    Nginx stream. The client connects to the load balancer address, not to a specific server instance.
+  </p>
+  <ul>
+    <li>Use health checks to remove failed server instances from rotation.</li>
+    <li>Use TCP mode because the application protocol runs over Qt sockets.</li>
+    <li>Use client reconnect logic so a disconnected client can reconnect through the load balancer.</li>
+    <li>Keep server session state minimal so reconnection to another server is possible.</li>
+  </ul>
+
+  <h3>Example HAProxy Layout</h3>
+  <pre>frontend qt_db_client
+    bind *:7000
+    mode tcp
+    default_backend qt_db_servers
+
+backend qt_db_servers
+    mode tcp
+    balance leastconn
+    option tcp-check
+    server server1 10.0.0.11:7100 check
+    server server2 10.0.0.12:7100 check
+    server server3 10.0.0.13:7100 check</pre>
+
+  <h2>5. Communication Protocol</h2>
+  <p>
+    Use framed binary or compact JSON messages over TCP. Each message should include a request ID so responses can be matched
+    to requests even when multiple operations are active.
+  </p>
+  <table>
+    <thead>
+      <tr>
+        <th>Request</th>
+        <th>Purpose</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>HELLO</code> / <code>AUTH</code></td>
+        <td>Open a client session and authenticate if required.</td>
+      </tr>
+      <tr>
+        <td><code>HEARTBEAT</code></td>
+        <td>Check server availability and update connection state in the client.</td>
+      </tr>
+      <tr>
+        <td><code>LIST_DATABASES</code></td>
+        <td>Return visible database names.</td>
+      </tr>
+      <tr>
+        <td><code>LIST_TABLES</code></td>
+        <td>Return tables for one database.</td>
+      </tr>
+      <tr>
+        <td><code>GET_TABLE_SCHEMA</code></td>
+        <td>Return columns, data types, nullable flags, default values, and primary key info.</td>
+      </tr>
+      <tr>
+        <td><code>GET_TABLE_ROWS</code></td>
+        <td>Return paged table rows.</td>
+      </tr>
+      <tr>
+        <td><code>INSERT_ROW</code></td>
+        <td>Insert a new row after client and server validation.</td>
+      </tr>
+      <tr>
+        <td><code>UPDATE_ROW</code></td>
+        <td>Save changes for an existing row.</td>
+      </tr>
+      <tr>
+        <td><code>DELETE_ROW</code></td>
+        <td>Delete a row using primary key values.</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2>6. Server Design</h2>
+  <ul>
+    <li>Use <code>QTcpServer</code> for incoming client connections.</li>
+    <li>Use event-driven socket handling for large numbers of idle or low-activity clients.</li>
+    <li>Use a worker thread pool for database tasks.</li>
+    <li>Use a bounded MySQL connection pool. Do not create one database connection per client.</li>
+    <li>Validate database names, table names, column names, data types, nullable fields, and primary keys on the server.</li>
+    <li>Use parameterized SQL for row insert, update, and delete operations.</li>
+    <li>Add queue limits, request timeouts, connection cleanup, and structured error responses.</li>
+  </ul>
+
+  <div class="warning">
+    Serving 100,000 simultaneous users requires multiple server instances, careful OS socket tuning, enough MySQL capacity,
+    load testing, and realistic pagination. The server should be designed for this target, then measured and scaled horizontally.
+  </div>
+
+  <h2>7. Client Design</h2>
+  <ul>
+    <li>Use a Qt Widgets <code>QMainWindow</code> with a split layout.</li>
+    <li>Left sidebar: <code>QTreeView</code> showing databases and expanded tables.</li>
+    <li>Right panel: table list after selecting a database, editable row grid after selecting a table.</li>
+    <li>Status area: show Connecting, Connected, Reconnecting, Disconnected, and Error states.</li>
+    <li>Use heartbeat and automatic reconnect logic.</li>
+    <li>Disable database actions when disconnected or while required schema metadata is unavailable.</li>
+  </ul>
+
+  <h2>8. User Workflow</h2>
+  <ol>
+    <li>User starts the client application.</li>
+    <li>Client connects to the load balancer endpoint.</li>
+    <li>Server returns the visible database list.</li>
+    <li>Client shows databases in the left sidebar.</li>
+    <li>User double-clicks a database.</li>
+    <li>Client requests tables for that database, expands the tree node, and shows the table list in the right panel.</li>
+    <li>User double-clicks a table.</li>
+    <li>Client requests schema and the first page of rows, then shows content in an editable table view.</li>
+    <li>User clicks Add Row to create a blank row.</li>
+    <li>User fills required not-null fields and clicks Save.</li>
+    <li>Client sends the row to the server. Server validates and inserts it into MySQL.</li>
+    <li>User selects a row and clicks Delete Row. Server deletes it using primary key values.</li>
+  </ol>
+
+  <h2>9. Table Editing Rules</h2>
+  <ul>
+    <li>Load schema before editing so the client knows required fields and primary keys.</li>
+    <li>Track new, modified, and deleted rows in the client model.</li>
+    <li>Validate not-null fields in the client before Save.</li>
+    <li>Repeat validation on the server because the client cannot be trusted as the only validation layer.</li>
+    <li>Use primary keys for update and delete. If a table has no primary key, make editing read-only or require a safe row identity strategy.</li>
+  </ul>
+
+  <h2>10. Performance Plan</h2>
+  <ul>
+    <li>Use pagination for table content. Never load a whole large table by default.</li>
+    <li>Use server-side metadata caching for database, table, and schema data.</li>
+    <li>Use request batching where useful, for example schema plus first page of rows.</li>
+    <li>Use async client requests so the UI remains responsive.</li>
+    <li>Add server metrics for active clients, request rate, queue depth, DB pool usage, errors, and response time.</li>
+    <li>Run load tests with simulated clients before final capacity claims.</li>
+  </ul>
+
+  <h2>11. Security Plan</h2>
+  <ul>
+    <li>Keep all database credentials on the server side.</li>
+    <li>Use TLS or a protected private network between client and load balancer when credentials or sensitive data are involved.</li>
+    <li>Add user authentication and authorization before exposing real databases.</li>
+    <li>Restrict visible databases and tables per user if required.</li>
+    <li>Audit insert, update, and delete operations.</li>
+  </ul>
+
+  <h2>12. Implementation Order</h2>
+  <ol>
+    <li>Create Qt project structure: <code>Common</code>, <code>Server</code>, <code>Client</code>, and <code>Deploy</code>.</li>
+    <li>Implement shared protocol framing and message serialization.</li>
+    <li>Implement basic Qt TCP server and client connection.</li>
+    <li>Add connection state display and heartbeat.</li>
+    <li>Add HAProxy or Nginx stream load balancer config.</li>
+    <li>Add <code>LIST_DATABASES</code>.</li>
+    <li>Add <code>LIST_TABLES</code>.</li>
+    <li>Add schema loading and paged table row loading.</li>
+    <li>Add editable table model with Add Row, Save, and Delete Row.</li>
+    <li>Add server-side validation and parameterized SQL execution.</li>
+    <li>Add reconnect and failover testing through the load balancer.</li>
+    <li>Add load tests and tune server, database pool, OS socket limits, and load balancer settings.</li>
+  </ol>
+
+  <h2>13. Key Risks</h2>
+  <table>
+    <thead>
+      <tr>
+        <th>Risk</th>
+        <th>Mitigation</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>100,000 concurrent users overload one server</td>
+        <td>Use multiple server instances and TCP load balancing. Keep sockets event-driven and database work pooled.</td>
+      </tr>
+      <tr>
+        <td>MySQL becomes the bottleneck</td>
+        <td>Use pagination, indexes, limited result sizes, metadata caching, and measured connection pool sizes.</td>
+      </tr>
+      <tr>
+        <td>Editing unsafe tables without primary keys</td>
+        <td>Detect primary keys during schema load and make unsafe tables read-only unless a safe identity rule is configured.</td>
+      </tr>
+      <tr>
+        <td>Client loses connection during save</td>
+        <td>Use request IDs, timeouts, reconnect logic, and clear success/failure responses from the server.</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2>14. Deliverables</h2>
+  <ul>
+    <li>Qt 5.14.0 server project.</li>
+    <li>Qt 5.14.0 client project.</li>
+    <li>Shared protocol library.</li>
+    <li>Load balancer configuration.</li>
+    <li>MySQL database access layer with connection pooling.</li>
+    <li>Client UI for database list, table list, row viewing, adding, saving, deleting, and connection state.</li>
+    <li>Load testing tools or scripts for capacity verification.</li>
+  </ul>
+
+  <div class="note">
+    Final MySQL target should be confirmed before packaging. Common targets are MySQL 5.7, MySQL 8.x, or MySQL Cluster 7.x.
+    Qt SQL driver compatibility and deployment details depend on the exact version and client library.
+  </div>
+</body>
+</html>

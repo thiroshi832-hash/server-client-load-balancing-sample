@@ -1,0 +1,31 @@
+.qmake.stash
+Makefile
+Makefile.*
+*.o
+*.obj
+*.exe
+*.ilk
+*.pdb
+*.idb
+*.user
+moc_*.cpp
+moc_predefs.h
+object_script.*
+debug/
+release/
+Build/
+
+# Deployed/generated runtime copied by scripts/build.ps1.
+Client/*.dll
+Client/platforms/
+Server/*.dll
+Server/sqldrivers/
+Server/translations/
+
+# Keep the minimal MySQL Connector/C headers/libs needed for offline rebuilds,
+# but do not version the downloaded archive or unnecessary tools.
+ThirdParty/downloads/
+ThirdParty/mysql-connector-c-6.1.11-win32/bin/
+ThirdParty/mysql-connector-c-6.1.11-win32/docs/
+ThirdParty/mysql-connector-c-6.1.11-win32/lib/vs12/
+ThirdParty/mysql-connector-c-6.1.11-win32/lib/vs14/

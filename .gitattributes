@@ -1,0 +1,5 @@
+*.dll binary
+*.lib binary
+*.pdf binary
+*.zip binary
+*.qm binary
